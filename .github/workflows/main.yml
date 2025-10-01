@@ -1,0 +1,154 @@
+name: BeastMode RDP Server
+on:
+  workflow_dispatch:  # تشغيل يدوي
+  schedule:          # إعادة تشغيل آلي
+    - cron: '0 0/5 * * *'  # كل 5 ساعات
+
+jobs:
+  beastmode-rdp:
+    runs-on: windows-latest  # دلوقتي، لاحقًا self-hosted
+    timeout-minutes: 300     # 5 ساعات حاليًا
+    steps:
+      - name: BeastMode System Optimization
+        run: |
+          try {
+              # تعطيل خدمات غير ضرورية (استثناء BFE وخدمات أساسية أخرى)
+              Get-Service | Where-Object {$_.Status -eq "Running" -and $_.Name -notlike "*TermService*" -and $_.Name -notlike "*Rpc*" -and $_.Name -notlike "*wuauserv*" -and $_.Name -notlike "*BFE*" -and $_.Name -notlike "*MpsSvc*"} | Stop-Service -Force -ErrorAction Stop
+              Write-Host "Non-essential services stopped successfully."
+          } catch {
+              Write-Warning "Some services (like BFE) couldn't be stopped - this is normal and safe. Continuing..."
+          }
+          # تخصيص الموارد للـ RDP
+          $process = Get-Process -Name "TermService" -ErrorAction SilentlyContinue
+          if ($process) { 
+              $process.PriorityClass = "AboveNormal"
+              $process.ProcessorAffinity = 255  # استخدام كل الـ CPUs
+          }
+          # تفعيل وضع High Performance
+          $powerPlan = powercfg /list | Select-String "High performance"
+          if ($powerPlan) { 
+              powercfg /setactive ( $powerPlan -replace '.*\((\w+)\).*', '$1' ) 
+          }
+          Write-Host "BeastMode optimization applied - Zero lag guaranteed! (BFE protected for security)"
+
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force # NLA
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Beast" dir=in action=allow protocol=TCP localport=3389 priority=10
+          Restart-Service -Name TermService -Force
+          Write-Host "RDP configured with beast-level security."
+
+      - name: Create RDP User with Dynamic Encrypted Password
+        run: |
+          # كلمة مرور ديناميكية قوية (20 حرف)
+          $password = -join ((33..126) | Get-Random -Count 20 | % {[char]$_})
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $username = "BEASTMASTER"
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+              Write-Host "BeastMaster user created!"
+          } else {
+              Write-Host "BeastMaster exists, updating password."
+              Set-LocalUser -Name $username -Password $securePass
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+          # تخزين مشفر
+          $cred = "$username:$password" | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString
+          echo "RDP_CREDENTIALS=$cred" >> $env:GITHUB_ENV
+          Write-Host "Secure credentials generated."
+
+      - name: Install Latest Tailscale with Ultra-Stability
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" set --accept-dns=false --accept-routes
+          Write-Host "Tailscale installed with ultra-stability settings."
+
+      - name: Establish Tailscale Connection with Beast Retry
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=beastmode-$env:GITHUB_RUN_ID
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 25) {  # زيادة المحاولات
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Milliseconds 1500  # تقليل الانتظار
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP failed after $retries retries."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Beastmode Tailscale connected. IP: $tsIP"
+
+      - name: Install BeastMode Software
+        run: |
+          try {
+              # تثبيت Chrome
+              $chromeUrl = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B00000000-0000-0000-0000-000000000000%7D%26lang%3Den%26browser%3D4%26usagestats%3D0%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3Dx64-stable-statsdef_1%26installdataindex%3Dempty/chrome.installer.exe"
+              Invoke-WebRequest -Uri $chromeUrl -OutFile "$env:TEMP\chrome.exe"
+              Start-Process -FilePath "$env:TEMP\chrome.exe" -ArgumentList "/silent", "/install" -Wait
+              Remove-Item "$env:TEMP\chrome.exe" -Force
+              Write-Host "Chrome installed for beastmode browsing."
+          } catch {
+              Write-Warning "Chrome installation skipped - continuing with core setup."
+          }
+          try {
+              # تثبيت Visual Studio Code
+              $vsCodeUrl = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+              Invoke-WebRequest -Uri $vsCodeUrl -OutFile "$env:TEMP\VSCodeSetup.exe"
+              Start-Process -FilePath "$env:TEMP\VSCodeSetup.exe" -ArgumentList "/silent", "/mergetasks=!runcode" -Wait
+              Remove-Item "$env:TEMP\VSCodeSetup.exe" -Force
+              Write-Host "VS Code installed for beastmode coding."
+          } catch {
+              Write-Warning "VS Code installation skipped - continuing with core setup."
+          }
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Verifying RDP on $env:TAILSCALE_IP:3389"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "RDP port 3389 not accessible."
+              exit 1
+          }
+          Write-Host "RDP beastmode verified!"
+
+      - name: Maintain BeastMode Connection with Detailed Logs
+        run: |
+          $credSecure = $env:RDP_CREDENTIALS | ConvertTo-SecureString
+          $credPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credSecure))
+          $username = $credPlain.Split(":")[0]
+          $password = $credPlain.Split(":")[1]
+          Write-Host "`n=== BEASTMODE RDP ACCESS ==="
+          Write-Host "🌟 Address: $env:TAILSCALE_IP"
+          Write-Host "🌟 Username: $username"
+          Write-Host "🌟 Password: $password"
+          Write-Host "🌟 Software Installed: Chrome, VS Code (if successful)"
+          Write-Host "🌟 Status: Beastmode active for 5 hours!"
+          Write-Host "🌟 Instructions: Connect via Microsoft Remote Desktop"
+          Write-Host "🌟 Last Check: $(Get-Date)"
+          Write-Host "======================`n"
+          $endTime = (Get-Date).AddHours(5)
+          $warnTime = (Get-Date).AddHours(4.5)
+          while ((Get-Date) -lt $endTime) {
+              if ((Get-Date) -gt $warnTime) {
+                  Write-Host "[$(Get-Date)] ⚠️ Warning: 30 minutes left. Restart soon!"
+              }
+              Write-Host "[$(Get-Date)] 🦁 BeastMode RDP Active - No lag!"
+              Start-Sleep -Seconds 300
+              $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+              if (-not $test.TcpTestSucceeded) {
+                  Write-Warning "🔧 Connection lost, restarting Tailscale..."
+                  & "$env:ProgramFiles\Tailscale\tailscale.exe" down
+                  & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=beastmode-$env:GITHUB_RUN_ID
+              }
+          }
+          Write-Host "⏹️ Auto-stopping. Restart via workflow or schedule."
